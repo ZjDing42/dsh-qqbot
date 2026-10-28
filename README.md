@@ -100,6 +100,8 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `preset` | string | - | Agent preset id |
 | `cwd` | string | `process.cwd()` | Agent 工作目录 |
 | `requireMention` | boolean | `true` | 群聊是否需要 @bot 才触发 |
+| `groupSmartReply` | boolean | `false` | 关闭仅 @ 触发后，由模型判断普通群消息是否需要接话 |
+| `groupReplyPrompt` | string | 内置判断策略 | 接话判断提示词，可编辑；留空使用默认策略，最多 20000 字符 |
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `directPrompt` | string | - | 私聊额外 system prompt |
 | `groupPromptMode` / `directPromptMode` | `text` / `file` | `text` | 群聊 / 私聊提示词来源 |
@@ -115,6 +117,14 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `debug` | boolean | `false` | 调试模式 |
 
 在设置 →「QQ 机器人」→「个性化提示词」中，群聊和私聊可分别开启「使用本地文件」，选择 `.md`、`.markdown` 或 `.txt` 文件，也可填写运行 Harness 的电脑上的绝对路径。文件须为 UTF-8 文本，大小不超过 1 MiB。文件正文会作为额外系统提示词使用，修改原文件后下一轮对话生效；文件不可读时会报错。切回文本模式会保留之前填写的提示词。
+
+### 群聊智能回复
+
+在设置 →「QQ 机器人」→「基础设置」中，先关闭「群聊仅回复 @机器人的消息」，再开启「群聊智能回复」。机器人会结合近期群聊和最近的机器人回复，判断是否需要接话。明确 @ 机器人的消息正常处理，命令和待答问题也不经过这层判断，私聊不受影响。两个开关都关闭时保留原来的群消息处理方式。
+
+开启后会显示「接话判断提示词」，可直接修改默认策略，例如更倾向安静、只在被叫到名字时接话，或积极帮助解答群内问题。它与「个性化提示词」分别保存：前者决定是否接话，后者决定正式回复的内容与风格。「恢复默认」只恢复表单内容，修改或恢复后都需要点击「保存」。留空也会使用默认策略。
+
+判断使用当前群聊选择的模型，只返回 `{"decision":"reply"}` 或 `{"decision":"silent"}`，不调用工具。判断沉默时不启动正式 Agent，也不会发送“已沉默”等提示；近期消息仍作为后续上下文保留。判断失败、超时或结果无法解析时，普通群消息保持沉默。判断本身会消耗模型额度，需要回复时会多一次模型调用，可能增加等待时间。
 
 ### 访问控制（access）
 

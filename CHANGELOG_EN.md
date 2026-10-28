@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Smart group replies**: when mention-only mode is off, an optional context-aware decision lets the bot reply or remain silent. The decision prompt is editable and can be reset or left blank for the default; explicit @mentions, commands, pending answers, and direct chats keep their normal handling.
 - **Local prompt files**: group and direct chats can independently switch between text and a local UTF-8 Markdown / text file, with a file picker and validation before saving. File edits take effect on the next turn; switching sources preserves the previous text and path.
 
 ## [0.5.4] - 2026-10-28

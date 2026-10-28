@@ -16,6 +16,7 @@
  */
 import { createElement, useCallback, useEffect, useId, useRef, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 import { BIND_CONFIG_PATH, BIND_PROMPT_FILE_PATH } from '../shared/bind-protocol.ts';
+import { DEFAULT_GROUP_REPLY_PROMPT } from '../shared/group-reply-defaults.ts';
 
 /** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
 interface AccessControlWire {
@@ -28,6 +29,8 @@ interface AccessControlWire {
 /** GET 回显的生效配置（appSecret 已剔除） */
 type ConfigWire = {
   requireMention?: boolean;
+  groupSmartReply?: boolean;
+  groupReplyPrompt?: string;
   streaming?: boolean;
   showToolResults?: boolean;
   debug?: boolean;
@@ -172,12 +175,12 @@ function useConfigPanelStyles(): void {
 }
 
 /** 开关（官方 Switch 原语结构：aria-checked 驱动视觉态） */
-function Switch({ checked, label, onChange }: {
-  checked: boolean; label: string; onChange: (next: boolean) => void;
+function Switch({ checked, label, onChange, disabled }: {
+  checked: boolean; label: string; onChange: (next: boolean) => void; disabled?: boolean;
 }): ReactNode {
   return createElement('button', {
     type: 'button', role: 'switch', 'aria-checked': checked, 'aria-label': label,
-    className: 'imqb2-switch',
+    className: 'imqb2-switch', disabled,
     onClick: () => { onChange(!checked); },
   }, createElement('span', { className: 'imqb2-switch-thumb' }));
 }
@@ -202,13 +205,13 @@ function Segmented({ value, options, onChange, label }: {
 }
 
 /** 开关行（label 左 + Switch 右 + 可选 help） */
-function SwitchRow({ label, help, checked, onChange }: {
-  label: string; help?: string; checked: boolean; onChange: (next: boolean) => void;
+function SwitchRow({ label, help, checked, onChange, disabled }: {
+  label: string; help?: string; checked: boolean; onChange: (next: boolean) => void; disabled?: boolean;
 }): ReactNode {
   return createElement('div', { className: 'imqb2-field' },
     createElement('div', { className: 'imqb2-head' },
       createElement('span', { className: 'imqb2-label' }, label),
-      createElement(Switch, { checked, label, onChange }),
+      createElement(Switch, { checked, label, onChange, disabled }),
     ),
     help === undefined ? null : createElement('p', { className: 'imqb2-help' }, help),
   );
@@ -239,6 +242,29 @@ function AreaRow({ label, help, value, rows, onChange }: {
       onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { onChange(event.currentTarget.value); },
     }),
     help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
+  );
+}
+
+/** 判断策略可独立编辑；恢复默认只改变待保存表单。 */
+function GroupReplyPromptField({ value, onChange }: {
+  value: string; onChange: (next: string) => void;
+}): ReactNode {
+  const inputId = useId();
+  return createElement('div', { className: 'imqb2-field' },
+    createElement('div', { className: 'imqb2-head' },
+      createElement('label', { className: 'imqb2-label', htmlFor: inputId }, '接话判断提示词'),
+      createElement('button', {
+        type: 'button', className: 'imqb2-file-pick',
+        onClick: () => { onChange(DEFAULT_GROUP_REPLY_PROMPT); },
+      }, '恢复默认'),
+    ),
+    createElement('textarea', {
+      id: inputId, className: 'imqb2-input imqb2-textarea', value, rows: 9, maxLength: 20000,
+      placeholder: '留空使用默认判断策略',
+      onChange: (event: ChangeEvent<HTMLTextAreaElement>) => { onChange(event.currentTarget.value); },
+    }),
+    createElement('p', { className: 'imqb2-hint' },
+      '决定何时接话，与群聊回复使用的个性化提示词分别保存。可修改判断规则，留空使用默认策略；修改或恢复默认后，请点击保存。'),
   );
 }
 
@@ -446,6 +472,8 @@ export function ConfigPanel(): ReactNode {
         if (stopped) return;
         const config: ConfigWire = {
           ...body.config,
+          groupSmartReply: body.config.groupSmartReply ?? false,
+          groupReplyPrompt: body.config.groupReplyPrompt?.trim() ? body.config.groupReplyPrompt : DEFAULT_GROUP_REPLY_PROMPT,
           groupPromptMode: body.config.groupPromptMode ?? 'text',
           directPromptMode: body.config.directPromptMode ?? 'text',
           groupPromptFile: body.config.groupPromptFile ?? '',
@@ -550,6 +578,20 @@ export function ConfigPanel(): ReactNode {
       help: '开启后，机器人仅可回复 @机器人的群聊消息',
       onChange: (v) => { patch('requireMention', v); },
     }),
+    createElement(SwitchRow, {
+      label: '群聊智能回复', checked: form.groupSmartReply ?? false,
+      disabled: form.requireMention ?? true,
+      help: (form.requireMention ?? true)
+        ? '请先关闭“群聊仅回复 @机器人的消息”。开启智能回复后，未被 @ 时由模型决定是否接话。'
+        : '未被 @ 时，使用当前群聊模型结合上下文决定是否接话；@ 消息正常处理。判断会消耗模型额度，判断失败时保持沉默。',
+      onChange: (v) => { patch('groupSmartReply', v); },
+    }),
+    form.groupSmartReply
+      ? createElement(GroupReplyPromptField, {
+          value: form.groupReplyPrompt ?? DEFAULT_GROUP_REPLY_PROMPT,
+          onChange: (v) => { patch('groupReplyPrompt', v); },
+        })
+      : null,
     createElement(SwitchRow, {
       label: '流式输出', checked: form.streaming ?? true,
       help: '回复内容分段实时推送到聊天',
