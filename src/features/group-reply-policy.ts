@@ -1,10 +1,9 @@
 /** 无工具的群聊回复意愿判断；不创建 Agent，也不向 QQ 发送任何消息。 */
 import type { Context } from '@deepseek-ai/cordis';
 import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm';
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
-import type { SessionEventLike } from '../session/types.ts';
 import { DEFAULT_GROUP_REPLY_PROMPT } from '../shared/group-reply-defaults.ts';
 import type { Logger } from '../types.ts';
 
@@ -81,21 +80,22 @@ function mediaSummary(attachments: readonly unknown[] | undefined): unknown[] | 
   });
 }
 
-function conversationSummary(events: readonly SessionEventLike[]): unknown[] {
+function conversationSummary(messages: readonly Message[]): unknown[] {
   const rows: Array<{ role: string; content: string }> = [];
-  // Work backwards and stop once enough actual user/assistant messages are found.
-  for (let i = events.length - 1; i >= 0 && rows.length < 6; i--) {
-    const event = events[i]!;
-    if (event.type !== 'assistant/message' && event.type !== 'user/message') continue;
-    const texts = event.message?.content?.filter((block) => block.type === 'text' && typeof block.text === 'string');
+  // Use the host's effective message history, including compaction replacements.
+  // Tool results also have the user role; never pass them or reasoning to the judge.
+  for (let i = messages.length - 1; i >= 0 && rows.length < 6; i--) {
+    const message = messages[i]!;
+    if ((message.role !== 'assistant' && message.role !== 'user') || message.source.kind === 'tool') continue;
+    const texts = message.content.filter((block) => block.type === 'text');
     if (!texts?.length) continue;
     const content = clip(texts.map((block) => clip(block.text, 1200)).join('\n'), 1200)!;
-    rows.push({ role: event.type === 'assistant/message' ? 'bot' : 'user', content });
+    rows.push({ role: message.role === 'assistant' ? 'bot' : 'user', content });
   }
   return boundedRows(rows.reverse(), 3000, 6);
 }
 
-function decisionContext(input: GroupReplyInput, events: readonly SessionEventLike[]): string {
+function decisionContext(input: GroupReplyInput, conversation: readonly Message[]): string {
   const currentIds = new Set(input.messages.map((message) => message.messageId));
   const current = input.messages.slice(-20).map((message) => ({
     messageId: clip(message.messageId, 160),
@@ -119,7 +119,7 @@ function decisionContext(input: GroupReplyInput, events: readonly SessionEventLi
   const currentMessages = boundedRows(current, 6000, 20);
   if (currentMessages.length === 0) throw new DecisionFailure('input-too-long');
   return JSON.stringify({
-    recentConversation: conversationSummary(events),
+    recentConversation: conversationSummary(conversation),
     recentGroupMessages: boundedRows(recent, 4000, 10),
     currentMessages,
   });
@@ -165,14 +165,15 @@ export class GroupReplyPolicy {
       if (!llm?.stream) throw new DecisionFailure('model-unavailable');
       const route = this.manager.getEffectiveModel('group', input.groupId);
       if (!route?.provider || !route.model) throw new DecisionFailure('model-unavailable');
-      const record = this.manager.getSessionRecord('group', input.groupId);
+      const conversation = await this.manager.getConversationMessages('group', input.groupId);
+      if (controller.signal.aborted) return false;
       const prompt = this.config.groupReplyPrompt?.trim() || DEFAULT_GROUP_REPLY_PROMPT;
       if (prompt.length > 20_000) throw new DecisionFailure('prompt-too-long');
       const options: GenerateOptions = {
         ...route,
         system: `${prompt}\n\n${PROTOCOL}`,
         messages: [createUserMessage({
-          content: [{ type: 'text', text: decisionContext(input, record?.agent.session.events ?? []) }],
+          content: [{ type: 'text', text: decisionContext(input, conversation) }],
           source: { kind: 'plugin', plugin: 'im-qqbot:group-reply-policy' },
         })],
         tools: [],
