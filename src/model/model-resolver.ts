@@ -42,6 +42,7 @@ export class ModelResolver {
     this.logger = logger;
     this.prefs = new PrefsStore(
       config.debug ? (msg) => this.logger?.debug(msg) : undefined,
+      { onError: (msg) => this.logger?.warn(`im-qqbot: ${msg}`) },
     );
     this.settings = new SettingsReader();
   }
@@ -102,6 +103,11 @@ export class ModelResolver {
    */
   getSessionId(sessionKey: string): string | undefined {
     return this.prefs.getSessionId(sessionKey);
+  }
+
+  /** sessionId → sessionKey（prefs 的反向查找） */
+  findSessionKey(sessionId: string): string | undefined {
+    return this.prefs.findSessionKey(sessionId);
   }
 
   /**

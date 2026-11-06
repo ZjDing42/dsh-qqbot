@@ -25,6 +25,7 @@ export interface SessionEventLike {
 export interface DshSessionLike {
   readonly id: string;
   readonly events?: readonly SessionEventLike[];
+  snapshotEvents?(): readonly SessionEventLike[];
   deriveMessages?(): readonly Message[];
 }
 
@@ -113,8 +114,10 @@ export interface DshAgentRegistry {
   /** 创建全新 session */
   create(options: {
     sessionId: string;
-    meta?: { cwd?: string; parentSession?: string; seedLength?: number; agentPreset?: string };
+    meta?: { cwd?: string; isSeeded?: boolean; parentSession?: string; agentPreset?: string };
     seed?: readonly unknown[];
+    /** 继承前缀长度（seeded fork 用，对齐宿官方 commands.fork） */
+    inheritedEventCount?: number;
     agentOptions?: { provider?: string; model?: string };
     setup?: AgentSetup;
   }): Promise<DshAgentHandle>;
@@ -127,8 +130,6 @@ export interface AgentPresetsLike {
   mount(agentCtx: Context, id?: string): Promise<unknown>;
   /** 列出所有可用 preset */
   list(): Promise<Array<{ id: string; name?: string; description?: string; broken?: string }>>;
-  /** 从 agent 的 preset scope 解析隔离服务（如 compaction），未挂载返回 undefined */
-  serviceFor(agent: { ctx: Context }, name: string): unknown | undefined;
 }
 
 /** 可用 preset 条目（/preset 命令展示用） */

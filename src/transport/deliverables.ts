@@ -7,16 +7,15 @@
  */
 import { basename, isAbsolute, resolve } from 'node:path';
 import type { ImQQBotConfig } from '../config.ts';
-import type { SessionRecord } from '../session/index.ts';
-import type { Logger } from '../types.ts';
-import { isPathAllowed, sendMediaFile, type MediaSenderLike } from '../media/send-media.ts';
+import type { Logger, ReplyTarget } from '../types.ts';
+import { isPathAllowed, resolveAgentCwd, sendMediaFile, type MediaSenderLike } from '../media/send-media.ts';
 import type { PresentedFileRef } from './events.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import type { QQBotSender } from './outbound-buffer.ts';
 
 /** 交付物投递器（outbound 路由只依赖此接口，便于测试注入） */
 export interface DeliverablesDelivererLike {
-  deliver(record: SessionRecord, files: PresentedFileRef[]): Promise<void>;
+  deliver: (target: ReplyTarget, files: PresentedFileRef[]) => Promise<void>;
 }
 
 export class DeliverablesDeliverer implements DeliverablesDelivererLike {
@@ -37,15 +36,15 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
     this.logger = logger;
   }
 
-  /** 轮末投递一批声明文件：逐个发送，未送达的聚合为一条文字提示 */
-  public async deliver(record: SessionRecord, files: PresentedFileRef[]): Promise<void> {
+  /** 轮末投递一批声明文件到本回合目标：逐个发送，未送达的聚合为一条文字提示 */
+  public async deliver(target: ReplyTarget, files: PresentedFileRef[]): Promise<void> {
     const limit = Math.max(1, this.config.sendFile?.maxFiles ?? 4);
-    const cwd = this.config.cwd || process.cwd();
+    const cwd = resolveAgentCwd(this.config.cwd);
     const missed: string[] = [];
     let sent = 0;
 
     for (const [index, file] of files.entries()) {
-      // 新声明记录绝对路径；历史相对路径按插件工作目录兜底解析
+      // 新声明记录绝对路径；历史相对路径按 agent 工作目录（workspace）兜底解析
       const absPath = isAbsolute(file.path) ? file.path : resolve(cwd, file.path);
       const display = basename(absPath);
       if (index >= limit) {
@@ -56,12 +55,12 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
         missed.push(`${display}（路径不在允许范围）`);
         continue;
       }
-      const result = await sendMediaFile(this.mediaBot, record.replyTarget, absPath);
+      const result = await sendMediaFile(this.mediaBot, target, absPath);
       if (result.outcome === 'sent') {
         sent++;
         this.logger.info(
           `im-qqbot: 交付物已发送 ${display} (${result.size} bytes) → `
-          + `${record.replyTarget.scope}:${record.replyTarget.targetId}`,
+          + `${target.scope}:${target.targetId}`,
         );
       } else if (result.outcome === 'failed') {
         this.logger.warn(`im-qqbot: 交付物发送失败 ${display}: ${result.error}`);
@@ -75,7 +74,7 @@ export class DeliverablesDeliverer implements DeliverablesDelivererLike {
       const text = ['📎 已生成文件（未能直接发送）：', ...missed.map((name) => `- ${name}`)].join('\n');
       for (const chunk of chunkMarkdownText(text, this.config.textChunkLimit)) {
         try {
-          await this.sender.sendMarkdown(record.replyTarget, chunk);
+          await this.sender.sendMarkdown(target, chunk);
         } catch (err) {
           this.logger.error(
             `im-qqbot: deliverables notice failed: ${err instanceof Error ? err.message : String(err)}`,

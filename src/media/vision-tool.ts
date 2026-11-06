@@ -8,11 +8,11 @@
  *
  * 手写 ToolDefinition（标准 JSON Schema），避免引入 dsh-tools 的 8 个 peer 依赖。
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
-import yaml from 'js-yaml';
+import { parseDocument, isMap, isSeq, isScalar } from 'yaml';
 import type { Context } from '@deepseek-ai/cordis';
 import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm';
 import type {
@@ -24,6 +24,12 @@ import type {
 } from '@deepseek-ai/dsh-llm';
 import type { VisionConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'plugin:dsh-im-qqbot': { kind: 'plugin:dsh-im-qqbot' };
+  }
+}
 
 /** 通过 dsh-llm 的 ImageBlock 间接引用 dsh-attachment 类型，避免直接依赖 dsh-attachment */
 type ImageAttachmentRef = ImageBlock['attachment'];
@@ -125,7 +131,7 @@ async function callVision(
       { type: 'image', attachment: imageRef },
       { type: 'text', text: prompt },
     ],
-    source: { kind: 'plugin', plugin: 'dsh-im-qqbot' },
+    source: { kind: 'plugin:dsh-im-qqbot' },
   });
 
   const options: GenerateOptions = {
@@ -176,7 +182,13 @@ function resolveDshHome(): string {
  *
  * 模型配置界面不暴露 `input` 字段，用户通过界面配置的视觉模型默认是纯文本，
  * 会导致 pi-ai adapter 拒绝图片输入。这里在启动时兜底：未声明 image 时自动补 `[text, image]`。
- * 幂等（已声明则跳过），解析/写入失败仅 warn 不阻断启动。
+ *
+ * 写入遵循与 setup/persist.ts 相同的约束（该文件是宿主用户级配置，多写者共存）：
+ * - 文档保真：eemeli/yaml Document API 原地编辑，注释/锚点/其他配置原样保留；
+ * - 原子写：同目录临时文件 + rename，崩溃不留半份文件；
+ * - 乐观校验：写入窗口内文件被外部改动则放弃本次补写（幂等，下次启动再补）；
+ * - fail-closed：解析失败仅 warn 不阻断启动（视觉功能可另行手动配置）。
+ * 幂等：已声明 image 则不写（不触 mtime，不引发宿主重载）。
  */
 export function ensureVisionInputModal(vision: VisionConfig, logger: Logger): void {
   if (!vision.enabled || !vision.provider || !vision.model) return;
@@ -187,33 +199,69 @@ export function ensureVisionInputModal(vision: VisionConfig, logger: Logger): vo
     if (!existsSync(settingsPath)) return;
 
     // YAML 禁止 tab 缩进（配置界面/编辑器可能写入），读入时把行首 tab 规范化为空格
-    const raw = readFileSync(settingsPath, 'utf8');
-    const normalized = raw.replace(/^\t+/gm, (tabs) => '  '.repeat(tabs.length));
-    const doc = yaml.load(normalized) as Record<string, unknown> | null;
-    if (doc === null || typeof doc !== 'object') return;
+    const before = readFileSync(settingsPath, 'utf8');
+    const normalized = before.replace(/^\t+/gm, (tabs) => '  '.repeat(tabs.length));
 
-    const piAi = doc['llm-pi-ai'] as { providers?: Record<string, unknown> } | undefined;
-    const provider = piAi?.providers?.[vision.provider] as { models?: unknown } | undefined;
-    const models = provider?.models;
-    if (!Array.isArray(models)) {
+    // intAsBigInt：整数不经 double 中转，避免回写时把用户其他配置里的大整数
+    // （安装 id、时间戳等）截断到 2^53 精度
+    const doc = parseDocument(normalized, { intAsBigInt: true });
+    if (doc.errors.length > 0) throw new Error(`settings.yaml 解析失败: ${doc.errors[0]?.message ?? 'unknown'}`);
+
+    const root = doc.contents;
+    if (!isMap(root)) throw new Error('settings.yaml 顶层不是映射');
+
+    // 逐层定位 llm-pi-ai.providers.{provider}.models（原地遍历，保留原文）
+    const piAi = root.get('llm-pi-ai', true);
+    if (!isMap(piAi)) {
+      logger.warn(`im-qqbot: settings.yaml 未找到 llm-pi-ai，请手动确认 vision 模型已声明 image 输入`);
+      return;
+    }
+    const providers = piAi.get('providers', true);
+    if (!isMap(providers)) {
+      logger.warn(`im-qqbot: settings.yaml 未找到 llm-pi-ai.providers.${vision.provider}，请手动确认 vision 模型已声明 image 输入`);
+      return;
+    }
+    const provider = providers.get(vision.provider, true);
+    if (!isMap(provider)) {
+      logger.warn(`im-qqbot: settings.yaml 未找到 llm-pi-ai.providers.${vision.provider}，请手动确认 vision 模型已声明 image 输入`);
+      return;
+    }
+    const models = provider.get('models', true);
+    if (!isSeq(models)) {
       logger.warn(`im-qqbot: settings.yaml 未找到 llm-pi-ai.providers.${vision.provider}.models，请手动确认 vision 模型已声明 image 输入`);
       return;
     }
-
-    const model = models.find(
-      (m): m is Record<string, unknown> =>
-        typeof m === 'object' && m !== null && (m as Record<string, unknown>).id === vision.model,
+    const model = models.items.find(
+      (item): item is NonNullable<typeof item> => isMap(item) && isScalar(item.get('id', true)) && String(item.get('id', true)) === vision.model,
     );
-    if (model === undefined) {
+    if (model === undefined || !isMap(model)) {
       logger.warn(`im-qqbot: settings.yaml 未找到 vision 模型 ${vision.model}，请手动确认已声明 image 输入`);
       return;
     }
 
-    const input = model.input;
-    if (Array.isArray(input) && input.includes('image')) return; // 已声明，幂等跳过
+    // 幂等：已声明 image 则不写（不触 mtime）
+    const input = model.get('input', true);
+    if (isSeq(input) && input.items.some((i) => isScalar(i) && i.value === 'image')) return;
 
-    model.input = ['text', 'image'];
-    writeFileSync(settingsPath, yaml.dump(doc), 'utf8');
+    // 原地补写 input: [text, image]，其余内容（注释/锚点/格式）原样保留
+    model.set('input', ['text', 'image']);
+    const next = doc.toString({ lineWidth: 0 });
+
+    // 乐观校验：写入窗口内被外部改动（宿主设置流程）则放弃，下次启动幂等重试
+    if (readFileSync(settingsPath, 'utf8') !== before) {
+      logger.warn('im-qqbot: settings.yaml 在写入窗口内被外部修改，跳过 vision input 补写（下次启动重试）');
+      return;
+    }
+
+    // 原子写：同目录临时文件 + rename
+    const tmpPath = `${settingsPath}.imqqbot.tmp`;
+    try {
+      writeFileSync(tmpPath, next, 'utf8');
+      renameSync(tmpPath, settingsPath);
+    } catch (err) {
+      try { unlinkSync(tmpPath); } catch { /* 临时文件可能不存在 */ }
+      throw err;
+    }
     logger.info(`im-qqbot: 已为 vision 模型补充 input: [text, image] (${vision.provider}/${vision.model})`);
   } catch (err) {
     logger.warn(`im-qqbot: 检查 settings.yaml vision input 失败: ${err instanceof Error ? err.message : String(err)}`);

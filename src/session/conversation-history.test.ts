@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm';
 import { Session, SessionId } from '@deepseek-ai/dsh-session';
@@ -13,6 +16,7 @@ vi.mock('../model/model-resolver.ts', () => ({
   ModelResolver: class {
     getEffectiveRoute() { return undefined; }
     getSessionId(key: string) { return savedIds.get(key); }
+    setSessionId(key: string, id: string) { savedIds.set(key, id); }
   },
 }));
 
@@ -42,6 +46,8 @@ function conversation(id: string, text = '可以用链式法则。'): Session {
 }
 
 function harness(storeAvailable = true, persistence?: Partial<SessionPersistenceReader>) {
+  const cwd = mkdtempSync(join(tmpdir(), 'qqbot-history-'));
+  cleanup.push(async () => { rmSync(cwd, { recursive: true, force: true }); });
   const live = new Map<string, DshAgent>();
   const retained = new Map<string, DshSessionLike>();
   const store = {
@@ -62,7 +68,7 @@ function harness(storeAvailable = true, persistence?: Partial<SessionPersistence
   };
   const logger: Logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const manager = new SessionManager(ctx, agents as unknown as DshAgentRegistry,
-    { appId: 'test', sessionIdleTimeout: 0 } as ImQQBotConfig, logger);
+    { appId: 'test', sessionIdleTimeout: 0, cwd } as ImQQBotConfig, logger);
   cleanup.push(() => manager.disposeAll());
   function register(session: DshSessionLike): DshAgent {
     const agent = {

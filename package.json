@@ -1,15 +1,15 @@
 {
   "name": "@tencent-connect/dsh-qqbot",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "icon": "./assets/icons/qq_logo.svg",
   "description": "在 QQ 私聊和群聊里直接对话 DeepSeek Harness。 Chat with DeepSeek Harness in QQ private and group chats.",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
     },
     "./client": {
       "default": "./lib/client.js"

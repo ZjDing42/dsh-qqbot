@@ -13,14 +13,15 @@
  * Only check results, file metadata, and SHA-256 hashes are printed.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const SECTION = 'qqbot:scope-prompt';
+const SECTION = 'qqbot:extra';
 
 class VerificationError extends Error {}
 
@@ -95,15 +96,18 @@ async function main() {
   const sdk = resolveSdk(resolve(values['sdk-root'] ?? repositoryRoot));
   const sdkRoot = sdk.root;
   const requireFromSdk = sdk.require;
-  const [{ Context }, promptSdk, { SessionManager }] = await Promise.all([
+  const [{ Context }, promptSdk, scopeSdk, { SessionManager }, { PrefsStore }] = await Promise.all([
     import(pathToFileURL(sdk.cordis).href),
     import(pathToFileURL(sdk.systemPrompt).href),
-    import(pathToFileURL(join(repositoryRoot, 'dist/session/session-manager.js')).href),
+    import(pathToFileURL(createRequire(sdk.systemPrompt).resolve('@deepseek-ai/dsh-scope')).href),
+    import(pathToFileURL(join(repositoryRoot, 'lib/session/session-manager.js')).href),
+    import(pathToFileURL(join(repositoryRoot, 'lib/model/prefs-store.js')).href),
   ]);
   const SystemPrompt = promptSdk.SystemPrompt ?? promptSdk.default;
   check(typeof Context === 'function' && typeof SystemPrompt === 'function', 'The selected Harness SDK does not expose the required services');
 
   const ctx = new Context();
+  const scratch = await mkdtemp(join(tmpdir(), 'qqbot-prompt-runtime-'));
   let manager;
   let disposedAgents = 0;
   let createdAgents = 0;
@@ -124,6 +128,7 @@ async function main() {
     directPromptFile: '',
     directPrompt: directText,
     sessionIdleTimeout: 0,
+    cwd: join(scratch, 'workspace'),
     debug: false,
   };
 
@@ -137,19 +142,22 @@ async function main() {
         id: `verification-agent-${createdAgents}`,
         ctx: ctx.extend(),
         status: 'idle',
-        session: { id: options.sessionId, events: [] },
+        session: { id: options.sessionId, events: [], snapshotEvents: () => [] },
         options: options.agentOptions ?? {},
         cancel() {},
         followup() { throw new VerificationError('Model execution is forbidden in this verification'); },
         async whenIdle() {},
         async runMaintenance() { throw new VerificationError('Maintenance is unnecessary in this verification'); },
       };
+      const agentScope = scopeSdk.createScope(ctx, agent);
+      agent.ctx = agentScope.ctx;
       if (options.setup) await options.setup(agent.ctx);
       agents.set(options.sessionId, agent);
       return {
         agent,
         async dispose() {
           if (agents.delete(options.sessionId)) disposedAgents++;
+          await agentScope.dispose();
         },
       };
     },
@@ -159,18 +167,22 @@ async function main() {
     await ctx.plugin(SystemPrompt, {});
     check(typeof ctx.systemPrompt?.assemble === 'function', 'The real SystemPrompt service did not start');
     const hostAgent = { id: 'ordinary-host-agent', ctx: ctx.extend() };
-    const hostContext = { agent: hostAgent, scope: hostAgent.ctx };
+    hostAgent.ctx = scopeSdk.createScope(ctx, hostAgent).ctx;
+    const hostContext = { agent: hostAgent, scope: hostAgent };
     const hostBefore = await ctx.systemPrompt.assemble(hostContext);
     const noAgentBefore = await ctx.systemPrompt.assemble();
 
     manager = new SessionManager(ctx, registry, config, logger);
+    // The official manager now persists created IDs. Isolate this verifier's
+    // store before opening any sessions; never write the user's preferences.
+    manager.modelResolver.prefs = new PrefsStore(undefined, { path: join(scratch, 'model-prefs.json') });
     const group = await manager.getOrCreate('group', 'verification-group', 'verification-sender', {
       scope: 'group', targetId: 'verification-group',
     });
     const direct = await manager.getOrCreate('c2c', 'verification-direct', 'verification-direct', {
       scope: 'c2c', targetId: 'verification-direct',
     });
-    const assemble = (record) => ctx.systemPrompt.assemble({ agent: record.agent, scope: record.agent.ctx });
+    const assemble = (record) => ctx.systemPrompt.assemble({ agent: record.agent, scope: record.agent });
 
     const groupAssembly = await assemble(group);
     promptSection(groupAssembly, fileText, 'Group file mode');
@@ -225,8 +237,14 @@ async function main() {
       await manager?.disposeAll();
     } finally {
       // Cordis releases may expose disposal on the context or its root fiber.
-      if (typeof ctx.dispose === 'function') await ctx.dispose();
-      else await ctx.fiber.dispose();
+      try {
+        if (typeof ctx.dispose === 'function') await ctx.dispose();
+        else await ctx.fiber.dispose();
+      } finally {
+        check(dirname(resolve(scratch)) === resolve(tmpdir()) && basename(scratch).startsWith('qqbot-prompt-runtime-'),
+          'Unexpected temporary verification directory');
+        await rm(scratch, { recursive: true, force: true });
+      }
     }
   }
 }

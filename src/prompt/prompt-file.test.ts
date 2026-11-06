@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadPromptFile, MAX_PROMPT_FILE_BYTES, resolveScopePrompt } from './prompt-file.ts';
+import { loadPromptFile, loadPromptFileSync, MAX_PROMPT_FILE_BYTES, resolveScopePrompt, resolveScopePromptSync } from './prompt-file.ts';
 
 const directories: string[] = [];
 function promptPath(name = 'QQ群提示词_新.md'): string {
@@ -15,7 +15,10 @@ afterEach(() => {
   for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe('loadPromptFile', () => {
+describe.each([
+  ['async preview', loadPromptFile],
+  ['native sync provider', async (path: string) => loadPromptFileSync(path)],
+] as const)('loadPromptFile (%s)', (_label, loadPromptFile) => {
   it('读取中文绝对路径、去除 UTF-8 BOM，并保持正文原样', async () => {
     const path = promptPath();
     const text = '# 系统提示词\r\n你是群聊助手。😀\n';
@@ -91,7 +94,10 @@ describe('loadPromptFile', () => {
   });
 });
 
-describe('resolveScopePrompt', () => {
+describe.each([
+  ['async', resolveScopePrompt],
+  ['native sync provider', async (...args: Parameters<typeof resolveScopePromptSync>) => resolveScopePromptSync(...args)],
+] as const)('resolveScopePrompt (%s)', (_label, resolveScopePrompt) => {
   it('旧配置缺省为文本来源且群聊、私聊隔离', async () => {
     const config = { groupPrompt: '群聊文本', directPrompt: '私聊文本' };
     expect(await resolveScopePrompt(config, 'group')).toBe('群聊文本');

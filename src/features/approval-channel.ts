@@ -9,9 +9,11 @@
  */
 import type { EventOptions } from '@deepseek-ai/cordis';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
+import { randomUUID } from 'node:crypto';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import { decodeButtonData } from './button-utils.ts';
 import { buildApprovalKeyboard, buildApprovalText } from './approval-renderer.ts';
+import type { DeliveryTargetResolver } from '../transport/turn-tracker.ts';
 
 // ── 最小契约（对齐 dsh-user-approval，避免硬依赖） ──
 
@@ -31,7 +33,7 @@ export interface ApprovalRequest {
      * 投影后的上下文，运行时拿不到 live session（类型契约与运行时的 gap）。此时
      * 只是无法回显命令原文，不应让整个审批失败，故这里标为可选。
      */
-    session?: { events?: ApprovalSessionEvent[] };
+    session?: { snapshotEvents?(): readonly ApprovalSessionEvent[] };
   };
   toolName: string;
   /** 关联的 tool/call 事件 id，用于从 session log 找回被 gate 的命令 */
@@ -58,6 +60,14 @@ export interface ApprovalChannelSenderLike {
   sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: unknown }): Promise<unknown>;
 }
 
+/** 配置投影（审批按钮校验 allowlist 用） */
+export interface ApprovalChannelConfigLike {
+  access: {
+    c2cMode: 'open' | 'allowlist' | 'disabled';
+    c2cAllow: readonly string[];
+  };
+}
+
 /** approval/request waterfall 的 answerer handler */
 export interface ApprovalChannelContext {
   on(
@@ -73,6 +83,8 @@ interface PendingApproval {
   record: ApprovalSessionRecordLike;
   request: ApprovalRequest;
   resolve: (outcome: ApprovalOutcome) => void;
+  /** 本审批的唯一标识，编码进按钮 data，点击时必须匹配（防旧卡片混淆） */
+  nonce: string;
   onAbort?: () => void;
 }
 
@@ -86,7 +98,7 @@ function commandOf(req: ApprovalRequest): string | undefined {
   if (req.callId === undefined) return undefined;
   // 审批请求可能来自没有 live session 的上下文（例如跨进程/投影后的 Agent），
   // 此时只是拿不到命令原文，不能因此让整个审批失败。
-  const events = req.agent.session?.events;
+  const events = req.agent.session?.snapshotEvents?.();
   if (!Array.isArray(events)) return undefined;
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i];
@@ -114,15 +126,24 @@ export class ApprovalChannel {
   private readonly manager: ApprovalChannelManagerLike;
   private readonly sender: ApprovalChannelSenderLike;
   private readonly logger: Logger;
+  private readonly config: ApprovalChannelConfigLike;
+  private readonly targets: DeliveryTargetResolver | undefined;
 
+  /**
+   * @param targets 回合投递目标解析（与出站共享）。缺省时按会话 replyTarget 被动回复。
+   */
   public constructor(
     manager: ApprovalChannelManagerLike,
     sender: ApprovalChannelSenderLike,
+    config: ApprovalChannelConfigLike,
     logger: Logger,
+    targets?: DeliveryTargetResolver,
   ) {
     this.manager = manager;
     this.sender = sender;
+    this.config = config;
     this.logger = logger;
+    this.targets = targets;
   }
 
   /**
@@ -141,7 +162,9 @@ export class ApprovalChannel {
       const request = req as ApprovalRequest;
       const nextFn = next as () => Promise<ApprovalOutcome>;
       const record = self.manager.findBySessionId(request.agent.id);
-      if (record) return self.park(record, request);
+      // 本回合按策略不投递到 QQ → 交给链上其他 answerer（Web/TUI）
+      const target = record ? self.resolveTarget(request.agent.id, record) : undefined;
+      if (record && target) return self.park(record, target, request);
       return nextFn();
     }, { global: true, prepend: true });
     this.logger.info('im-qqbot: QQ approval channel installed');
@@ -156,7 +179,7 @@ export class ApprovalChannel {
     entry.resolve('cancelled');
   }
 
-  /** 按钮点击决策：解码 button_data，settle pending 审批 */
+  /** 按钮点击决策：解码 button_data，校验点击者授权，settle pending 审批 */
   public handleInteraction(event: InteractionEvent): boolean {
     const peerId = event.group_openid ?? event.user_openid;
     if (!peerId) return false;
@@ -171,6 +194,20 @@ export class ApprovalChannel {
     const button = decodeButtonData(data);
     if (!button || button.t !== 'approval') return false;
 
+    // nonce 必须匹配 pending：旧卡片/其它会话的卡片点击不 settle（#94-3）
+    if (button.n !== entry.nonce) {
+      this.logger.warn(`im-qqbot: approval button nonce mismatch: key=${record.sessionKey}`);
+      return false;
+    }
+
+    // 白名单模式下审批只认名单内用户；点击者身份缺失同样拒绝（fail-closed，#94-3）
+    const clicker = event.group_member_openid ?? event.user_openid;
+    if (this.config.access.c2cMode === 'allowlist'
+      && (!clicker || !this.config.access.c2cAllow.includes(clicker))) {
+      this.logger.warn(`im-qqbot: approval button rejected (clicker not allowlisted): user=${clicker ?? '(missing)'} key=${record.sessionKey}`);
+      return false;
+    }
+
     this.pending.delete(record.sessionKey);
     this.removeAbort(entry);
     entry.resolve(button.d === 'allow' ? 'allowed-once' : 'rejected');
@@ -178,17 +215,22 @@ export class ApprovalChannel {
   }
 
   /** 走 QQ 通道：发审批消息 + 挂起 Promise，等待用户决策 */
-  private async park(record: ApprovalSessionRecordLike, request: ApprovalRequest): Promise<ApprovalOutcome> {
+  private async park(
+    record: ApprovalSessionRecordLike,
+    target: ReplyTarget,
+    request: ApprovalRequest,
+  ): Promise<ApprovalOutcome> {
     const key = record.sessionKey;
     // 会话回收/取消可能在发送前发生：signal 已 abort 则直接失败
     if (request.signal?.aborted) return 'cancelled';
 
     const command = commandOf(request);
+    const nonce = randomUUID().slice(0, 8);
     try {
       await this.sender.sendMarkdown(
-        record.replyTarget,
+        target,
         buildApprovalText(request, command),
-        { keyboard: buildApprovalKeyboard() },
+        { keyboard: buildApprovalKeyboard(nonce) },
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -197,7 +239,7 @@ export class ApprovalChannel {
     }
 
     return new Promise<ApprovalOutcome>((resolve) => {
-      const entry: PendingApproval = { record, request, resolve };
+      const entry: PendingApproval = { record, request, resolve, nonce };
       if (request.signal) {
         const onAbort = (): void => {
           if (this.pending.get(key) !== entry) return;
@@ -210,6 +252,11 @@ export class ApprovalChannel {
       this.pending.set(key, entry);
       this.logger.info(`im-qqbot: approval sent to QQ, waiting for decision key=${key}`);
     });
+  }
+
+  /** 本回合的投递目标；未注入解析器时沿用会话 replyTarget */
+  private resolveTarget(sessionId: string, record: ApprovalSessionRecordLike): ReplyTarget | undefined {
+    return this.targets ? this.targets.targetFor(sessionId) : record.replyTarget;
   }
 
   private removeAbort(entry: PendingApproval): void {

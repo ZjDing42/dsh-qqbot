@@ -10,6 +10,7 @@
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import type { QqInputRegistry } from './qq-input-origin.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
@@ -93,6 +94,7 @@ export async function handleInbound(
   manager: SessionManager,
   config: ImQQBotConfig,
   logger: Logger,
+  inputs: QqInputRegistry,
 ): Promise<void> {
   if (ctx.signal.aborted) return;
   const msg = ctx.message as unknown as ProcessedMessage;
@@ -144,6 +146,9 @@ export async function handleInbound(
   const cancel = (): void => record.agent.cancel({ kind: 'user' });
   ctx.signal.addEventListener('abort', cancel, { once: true });
   try {
+    // Register before followup: the host can emit user/message synchronously.
+    // One accepted batch becomes one QQ-owned input and is submitted only once.
+    inputs.register(String(message.id));
     record.agent.followup(message);
     logger.info(`→ followup sent: key=${scope}:${peerId}`);
     // 按实际输入消费；会话创建/模型运行期间新到的消息仍留在缓存里。

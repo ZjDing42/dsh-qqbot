@@ -17,7 +17,7 @@ Scan to join the QQ group / channel
 
 <table>
 <tr>
-<td align="center" width="50%"><img src="./assets/docs/qqgroup.jpg" height="360" alt="QQ Group QR Code" /><br /><b>QQ Developer Group</b><br /><sub>Group ID: 1032635674</sub></td>
+<td align="center" width="50%"><img src="./assets/docs/qqgroup.jpg" height="360" alt="QQ Group QR Code" /><br /><b>QQ Developer Group</b><br /><sub>Group 1: 1032635674 · Group 2: 1056948758</sub></td>
 <td align="center" width="50%"><img src="./assets/docs/qqchannel.jpg" height="360" alt="QQ Channel QR Code" /><br /><b>QQ Developer Channel</b><br /><sub>Channel ID: 20dnumts4z</sub></td>
 </tr>
 </table>
@@ -108,7 +108,7 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `groupPromptFile` / `directPromptFile` | string | - | Absolute local text-file path used in file mode |
 | `textChunkLimit` | number | `4500` | Max chars per message |
 | `streaming` | boolean | `true` | Enable streaming output (always disabled in groups) |
-| `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min |
+| `sessionIdleTimeout` | number | `1800000` | Session idle timeout (ms), default 30 min; `<=0` disables eviction |
 | `processingTimeoutMs` | number | `1800000` | Processing timeout (ms), aborts the current LLM call |
 | `maxQueue` | number | `20` | Max concurrent queue length |
 | `historyLimit` | number | `10` | Group history buffer size |
@@ -134,6 +134,14 @@ The decision uses the current group model, returns only `{"decision":"reply"}` o
 | `access.c2cAllow` | string[] | `[]` | Direct-chat allowlist (user openid) |
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | Group access mode |
 | `access.groupAllow` | string[] | `[]` | Group allowlist (group openid) |
+
+### Proactive delivery (proactiveDelivery)
+
+Turns triggered by QQ inbound always reply passively; service turns (e.g. schedules) are always pushed proactively. This only controls turns driven by non-QQ input (e.g. continuing a QQ session from the desktop):
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `proactiveDelivery.externalTurns` | `off`/`c2c`/`all` | `c2c` | `off` never push; `c2c` push direct chats only; `all` push direct and group chats |
 
 ### Rich media (media)
 
@@ -223,7 +231,7 @@ src/
 
 ## Session Routing
 
-sessionKey: `qqbot:${appId}:${scope}:${peerId}`, with the SessionId derived deterministically via SHA-256 so sessions survive restarts.
+sessionKey: `qqbot:${appId}:${scope}:${peerId}`; a UUID session id is minted for new sessions and persisted to `model-prefs.json`, resuming by the persisted id after restarts; pre-0.6 sessions keep their originally derived ids.
 
 Resolution strategy: in-process reuse → persisted resume → fresh create.
 
@@ -233,7 +241,7 @@ Resolution strategy: in-process reuse → persisted resume → fresh create.
 - **Declarative dependencies** — `inject = ['agents']`, no direct coupling to other plugins
 - **Session isolation** — one independent Agent per QQ direct user / group
 - **Preset support** — mount presets (toolkits, prompts, etc.) via the `agent-presets` service
-- **Idle eviction** — auto-dispose Agents on timeout to prevent memory leaks
+- **Idle eviction** — idle Agents are disposed after timeout to prevent leaks (proactive push still resolves the peer from the session mapping)
 - **Markdown output** — replies sent as Markdown with code-block/table-aware chunking
 - **Image understanding** — supports `qqbot_describe_image` vision to analyze images sent by users
 - **File sending** — supports `qqbot_send_file` to send local files to users (path allowlist enabled by default)

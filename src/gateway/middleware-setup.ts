@@ -42,15 +42,15 @@ export function setupMiddlewares(
   // 2. 消息过滤：bot 回声 + 消息去重
   bot.use(messageFilter({ skipSelfEcho: false }));
 
-  // 3. 访问控制（白名单/开放/禁用）
+  // 3. 访问控制（空名单 = 拒绝所有人，fail-closed）
   bot.use(accessPolicy({
     c2c: {
       mode: config.access.c2cMode,
-      allow: config.access.c2cAllow.length > 0 ? config.access.c2cAllow : ['*'],
+      allow: config.access.c2cAllow,
     },
     group: {
       mode: config.access.groupMode,
-      allow: config.access.groupAllow.length > 0 ? config.access.groupAllow : ['*'],
+      allow: config.access.groupAllow,
     },
     onBlock: (_mCtx, reason) => {
       if (config.debug) {
@@ -98,7 +98,7 @@ export function setupMiddlewares(
     // 关闭 autoHelp：help 命令由 qqbot 注册为 /bot-help，
     // 避免 SDK 再自动注册一个无前缀的 /help 造成重复
     autoHelp: false,
-    commands: buildCommandList({ manager, config }),
+    commands: buildCommandList({ manager, config, logger }),
   });
   bot.use(slash.middleware);
 

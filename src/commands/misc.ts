@@ -1,17 +1,18 @@
 /**
  * 杂项命令
  *
- * - /bot-ping /bot-version：QQBot 插件特有（连通性测试、版本信息）
+ * - /bot-ping /bot-version /bot-me：QQBot 插件特有（连通性测试、版本、身份）
  * - /stop：中止当前生成（对应底层 agent cancel，通用能力）
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { getScopePeer, PLUGIN_VERSION } from '../shared/index.ts';
+import { getScopePeer, PLUGIN_VERSION, sendMarkdownChunked } from '../shared/index.ts';
 
 /** /bot-ping — 测试当前 dsh 与 QQ 连接的网络延迟 */
 export function pingCommand(): CategorizedCommand {
   return {
     name: 'bot-ping',
     category: 'qqbot',
+    scope: 'all',
     description: '测试当前 dsh 与 QQ 连接的网络延迟',
     usage: [
       '/bot-ping',
@@ -44,6 +45,7 @@ export function versionCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'bot-version',
     category: 'qqbot',
+    scope: 'all',
     description: '查看版本信息',
     handler: () => {
       const current = manager.getEffectiveModel('c2c', '');
@@ -53,11 +55,36 @@ export function versionCommand({ manager }: CommandDeps): CategorizedCommand {
   };
 }
 
+/**
+ * /bot-me — 查看发送者身份标识
+ *
+ * 私聊返回 user openid、群聊返回群成员 openid 与群 openid
+ * （分别对应 access.c2cAllow / groupAllow 的名单 key）。
+ */
+export function meCommand({ config }: CommandDeps): CategorizedCommand {
+  return {
+    name: 'bot-me',
+    category: 'qqbot',
+    scope: 'all',
+    description: '查看你的 OpenID',
+    handler: async (cmdCtx) => {
+      const senderId = cmdCtx.message.senderId ?? 'unknown';
+      const lines = [`🆔 你的 OpenID：**${senderId}**`];
+      if (cmdCtx.message.groupOpenid) {
+        lines.push(`👥 本群 OpenID：**${cmdCtx.message.groupOpenid}**`);
+      }
+      await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);
+      return { kind: 'noop' as const };
+    },
+  };
+}
+
 /** /stop — 中止当前生成（隐藏） */
 export function stopCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'stop',
     category: 'agent',
+    scope: 'all',
     description: '中止当前生成',
     hidden: true,
     handler: (cmdCtx) => {

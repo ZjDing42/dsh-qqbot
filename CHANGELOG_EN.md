@@ -8,17 +8,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Added
+### New Features
 
 - **Smart group replies**: when mention-only mode is off, an optional context-aware decision lets the bot reply or remain silent. The decision prompt is editable and can be reset or left blank for the default; explicit @mentions, commands, pending answers, and direct chats keep their normal handling.
 - **Local prompt files**: group and direct chats can independently switch between text and a local UTF-8 Markdown / text file, with a file picker and validation before saving. File edits take effect on the next turn; switching sources preserves the previous text and path.
+- **Scope-aware extra prompts**: group/DM prompts load per session and survive session resume; config changes apply on the next message.
+- **Turns that did not start in QQ are pushed to QQ**: continuing a bound session from the desktop, or a turn the host starts itself (a schedule, injected context, and the like), delivers the reply to the matching DM or group. It no longer spends the passive-reply quota of the previous QQ message, and it does not attach to that old message. Messages that arrive in QQ stay passive replies, and streaming is unchanged. Proactive messages must be enabled on the QQ Open Platform, or the send fails.
+- **Idle eviction can be disabled**: setting `sessionIdleTimeout` to `0` stops proactive eviction (the default stays 30 minutes).
 
-## [0.5.4] - 2026-10-28
+### ⚠️ Behavior Changes
+
+- **Built-in prompt slimmed down**: only a one-line channel declaration is injected by default; scope rules and behavioral instructions are no longer built in — put group-specific guidance (e.g. mention discipline) into `groupPrompt`.
 
 ### Fixed
 
-- **Saving configuration no longer clobbers other plugins**: binding, saving settings, and unbinding now edit cordis.patch.yml in place — other plugins' entries and comments are preserved instead of the whole file being rewritten. (#53)
-- **Long prompts can be saved**: the settings-save request body limit is raised from 4KB to 512KB, so long system / group prompts and large allowlists are no longer rejected. (#69)
+- **Prompts no longer lost after idle eviction**: re-installed when a still-live agent is reused; installation failures only log a warning and never break session creation.
+
+## [0.5.5] - 2026-10-30
+
+### Fixed
+
+- **Fixed the broken QR code in the in-app binding flow**: qrcode is now loaded via `createRequire`, bypassing the missing-API issue caused by the host's ESM interop. When the QR cannot be produced, the page falls back to a notice offering to restart the app, open the link in a browser, or enter credentials manually.
+
+## [0.5.4] - 2026-10-28
+
+### New Features
+
+- **New `/bot-me` command**: shows the sender's OpenIDs (user openid in DMs; group-member openid and group openid in groups) as a self-service entry for allowlist onboarding — users hand the IDs to an admin to be added to the lists.
+- **Admin command authorization**: `/preset` and `/model` work in both DMs and groups, but only allowlisted users may switch the preset or model (a group switch affects that group's session); each command's DM/group availability is shown in `/bot-help`. (#5)
+
+### ⚠️ Behavior Changes (secure defaults)
+
+- **Access control tightened by default**: DMs default to allowlist with an empty list rejecting everyone (previously empty lists silently allowed everyone); groups default to open (guarded by group membership and the @-mention gate). On QR binding, DMs switch to allowlist with the list reset to the scanning user (rebinding swaps the owner) — binding grants access.
+- **Isolated default workspace**: the agent working directory now defaults to `~/.dsh-qqbot/workspace` instead of following the DSH process directory; set `cwd` explicitly to override.
+- **Approval buttons check permissions**: in allowlist mode, approval buttons only take effect for allowlisted users — clicks by non-authorized members and forwarded DM cards clicked by others are ignored.
+
+### Fixed
+
+- **Saving configuration no longer clobbers other plugins**: binding, saving settings, and unbinding only touch this plugin's own entry; other plugins' content and comments are preserved. (#53)
+- **Long prompts can be saved**: the settings-save request body limit is raised from 4KB to 512KB. (#69)
+- **Vision-path hazard fixed**: the `qqbot_describe_image` message source now uses the current session format, so future image injection into the main conversation will not fail. (#77)
+- **Hardened session ids**: unified `session-` prefix (#81) — community plugins no longer misjudge QQ sessions, multi-process concurrency produces no duplicate ids, and existing sessions keep their original ids.
+- **Fixed model switching**: both the `/model` crash and the "history failed to load" error after restarting post-switch are fixed, with conversation history fully preserved.
+- **Fixed session-event reads**: `/tokens` showing 0, `/export` producing empty output, and approval buttons not echoing the gated command — all fixed.
+- **Fixed compaction**: `/compact` wrongly reporting the service as unavailable or "no active session" — fixed; in the latter case the session is revived from disk before compacting.
+- **Fixed config save failure with link installs**: saving from the settings UI kept reporting "profile directory not found" when installed via `dsh plugin add link:` — fixed. With multiple profiles sharing the same source, writes target the profile of the current process. Remaining failures point at manually editing `cordis.patch.yml`. (#78)
+- **Fixed allowlist default bypass**: omitting `access` entirely still fell back to open DMs (the outer schema default was not updated with the field defaults) — now aligned to allowlist and pinned by tests. (#94)
+- **Approval cards bound to their request and hardened**: buttons now carry the pending approval's unique nonce, so stale cards no longer settle; in allowlist mode a missing clicker identity is rejected too. (#94)
+- **File-send path allowlist resolves symlinks**: paths are judged by their real locations; a symlink inside an allowed root pointing outside is rejected. (#94)
+- **Image attachments named by their real format**: the QQ gateway labels all images `image/png` (most are actually GIF/JPEG), so saved files carried wrong extensions and extension-based image decoding failed; extensions are now corrected from the file header (magic bytes) — bytes unchanged, no transcoding, unknown formats keep the original behavior. (#76)
+- **Unified workspace path resolution**: introduced a single source of truth for the plugin data directory (`~/.dsh-qqbot`), from which the workspace, media, and model-preference paths are uniformly derived; without an explicit `cwd` the host process directory is no longer wrongly used (previously causing workspace file sends to be denied). Missing files now report "file not found" instead of a misleading path denial.
+- **Vision config auto-patch no longer clobbers settings.yaml**: the startup fix-up that declares `input` for the vision model now uses fidelity-preserving document editing (comments, anchors, and other settings kept as-is) with atomic writes and conflict-aware retry; the previous full re-serialization wiped all comments and formatting from the file.
+- **Concurrent-safe preference file**: `model-prefs.json` (the session-id mapping shared by multi-bot and multi-profile setups) now writes atomically and merges other writers' entries before overwriting, so coexisting bots/profiles no longer clobber each other's mappings; deletions carry tombstones so concurrent writes cannot resurrect them; load/write failures surface as visible warnings (previously debug-only or silent — a lost mapping showed up as "lost context in QQ" with nothing to trace).
+- **Fixed an unopenable session list**: when resuming a session fails, a new one is created only after confirming the session is genuinely absent on disk; corrupt logs and backend failures no longer recreate the same session id (which used to write one id into several directories, after which the host refused to load the whole session list). Such failures now fail loudly with a log entry, and the original history is still there once the fault clears.
+- **Fixed concurrent messages landing on the wrong session**: the legacy session id derived from the user identity is now only used to migrate existing sessions, never to create new ones; concurrent requests for the same session (a slash command arriving alongside a normal message) are coalesced into one resume/create, so two mutually overwriting, never-reclaimed session instances are no longer produced.
+- **Vision config patch keeps numeric precision**: integers are preserved verbatim when the `input` declaration is added, so large integers in the user's `settings.yaml` (install ids, timestamps) are no longer truncated.
+
+### Internal
+
+- Added a host-API adapter layer that uniformly supports both old and new host interface shapes.
 
 ## [0.5.3] - 2026-10-27
 

@@ -5,6 +5,8 @@ import type { ImQQBotConfig } from '../config.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import type { SessionManager } from '../session/index.ts';
 import { handleInbound } from './inbound.ts';
+import { QqInputRegistry } from './qq-input-origin.ts';
+import { TurnTracker } from './turn-tracker.ts';
 
 const { createMiddlewareContext } = await import(new URL(
   'middleware/types.js', import.meta.resolve('@tencent-connect/qqbot-nodejs'),
@@ -17,6 +19,7 @@ function deferred() {
 }
 
 function harness() {
+  const inputs = new QqInputRegistry();
   const groupId = randomUUID();
   const logger = { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const sendMarkdown = vi.fn(async () => {});
@@ -48,10 +51,53 @@ function harness() {
     const message = followup.mock.calls[0]?.[0] as { content: Array<{ type: string; text?: string }> };
     return message.content.filter((block) => block.type === 'text').map((block) => block.text).join('\n');
   }
-  return { ctx, manager, config, logger, followup, whenIdle, getOrCreate, sendMarkdown, store, key, entry, body, record };
+  return { ctx, manager, config, logger, followup, whenIdle, getOrCreate, sendMarkdown, store, key, entry, body, record, inputs };
 }
 
 describe('smart group inbound context', () => {
+  it('registers a smart reply once before dispatch and keeps a later desktop turn proactive', async () => {
+    const test = harness();
+    const target = { scope: 'group' as const, targetId: test.ctx.message.groupOpenid!, msgId: 'current' };
+    const tracker = new TurnTracker({ findBySessionId: () => ({ replyTarget: target }) },
+      test.inputs, { externalTurns: 'all' }, test.logger);
+    test.followup.mockImplementation(message => {
+      tracker.begin('session', 0);
+      tracker.note('session', message as Record<string, unknown>);
+      expect(tracker.planFor('session')).toEqual({ target, proactive: false });
+    });
+
+    await handleInbound(test.ctx, test.manager, test.config, test.logger, test.inputs);
+
+    expect(test.followup).toHaveBeenCalledOnce();
+    expect(test.inputs.size).toBe(1);
+    tracker.end('session');
+    expect(test.inputs.size).toBe(0);
+    tracker.begin('session', 1);
+    tracker.note('session', { id: 'desktop-message', source: { kind: 'user' } });
+    expect(tracker.planFor('session')).toEqual({
+      target: { scope: 'group', targetId: target.targetId, forceProactive: true }, proactive: true,
+    });
+    tracker.end('session');
+  });
+
+  it('cancels an active turn but retains the serial wait until the agent is idle', async () => {
+    const test = harness();
+    const waiting = deferred();
+    const stopped = deferred();
+    test.whenIdle.mockImplementation(async () => { waiting.resolve(); await stopped.promise; });
+    let completed = false;
+    const task = handleInbound(test.ctx, test.manager, test.config, test.logger, test.inputs)
+      .then(() => { completed = true; });
+    await waiting.promise;
+    test.ctx.abort('processing-timeout');
+    expect(test.record.agent.cancel).toHaveBeenCalledExactlyOnceWith({ kind: 'user' });
+    expect(test.followup).toHaveBeenCalledOnce();
+    expect(completed).toBe(false);
+    stopped.resolve();
+    await task;
+    expect(completed).toBe(true);
+  });
+
   it('includes silent group context when a non-mention message is accepted', async () => {
     const test = harness();
     const previous = test.entry('previous', '我们正在讨论如何给项目部署监控。');
@@ -59,7 +105,7 @@ describe('smart group inbound context', () => {
     await test.store.append(test.key, test.entry('current', test.ctx.message.content), 10);
     test.ctx.state.history = [previous];
 
-    await handleInbound(test.ctx, test.manager, test.config, test.logger);
+    await handleInbound(test.ctx, test.manager, test.config, test.logger, test.inputs);
 
     expect(test.followup).toHaveBeenCalledOnce();
     expect(test.body()).toContain(previous.content);
@@ -85,7 +131,7 @@ describe('smart group inbound context', () => {
       await test.store.append(test.key, duringTurn, 10);
     });
 
-    await handleInbound(test.ctx, test.manager, test.config, test.logger);
+    await handleInbound(test.ctx, test.manager, test.config, test.logger, test.inputs);
 
     expect(test.body()).toContain(previous.content);
     expect(test.body()).not.toContain(duringCreate.content);
@@ -107,7 +153,7 @@ describe('smart group inbound context', () => {
       await test.store.append(test.key, { ...message, timestamp: Date.now() }, 10);
     }
 
-    await handleInbound(test.ctx, test.manager, test.config, test.logger);
+    await handleInbound(test.ctx, test.manager, test.config, test.logger, test.inputs);
 
     const body = test.body();
     expect(body).toContain('member-a');
@@ -122,7 +168,7 @@ describe('smart group inbound context', () => {
     const test = harness();
     test.ctx.abort('test-cancelled');
 
-    await handleInbound(test.ctx, test.manager, test.config, test.logger);
+    await handleInbound(test.ctx, test.manager, test.config, test.logger, test.inputs);
 
     expect(test.getOrCreate).not.toHaveBeenCalled();
     expect(test.followup).not.toHaveBeenCalled();
@@ -141,7 +187,7 @@ describe('smart group inbound context', () => {
     };
     test.ctx.state.downloadedQuoteFiles = [{ filename: 'quoted-chart.png', localPath: '/tmp/quoted-chart.png' }];
 
-    await handleInbound(test.ctx, test.manager, test.config, test.logger);
+    await handleInbound(test.ctx, test.manager, test.config, test.logger, test.inputs);
 
     const body = test.body();
     const firstQuote = body.indexOf('第一个被引用的回答');
@@ -164,7 +210,7 @@ describe('smart group inbound context', () => {
       await release.promise;
       return test.record;
     });
-    const task = handleInbound(test.ctx, test.manager, test.config, test.logger);
+    const task = handleInbound(test.ctx, test.manager, test.config, test.logger, test.inputs);
     await creating.promise;
     test.ctx.abort('test-cancelled');
     release.resolve();

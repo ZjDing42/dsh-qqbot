@@ -53,6 +53,19 @@ export interface SendFileConfig {
   maxFiles: number;
 }
 
+/**
+ * 非 QQ 读者输入（如桌面端续聊 QQ 会话）的回合是否主动推送到 QQ。
+ * - off：不推送，回复只留在发起的界面；
+ * - c2c：只推送私聊会话（默认，避免桌面上的私人操作出现在群里）；
+ * - all：私聊和群聊都推送。
+ */
+export type ExternalTurnDelivery = 'off' | 'c2c' | 'all';
+
+/** 主动推送策略（定时任务等服务回合始终主动推送） */
+export interface ProactiveDeliveryConfig {
+  externalTurns: ExternalTurnDelivery;
+}
+
 export interface ImQQBotConfig {
   /** QQ Bot AppID */
   appId: string;
@@ -64,7 +77,7 @@ export interface ImQQBotConfig {
   model?: string;
   /** Agent preset id */
   preset?: string;
-  /** Agent 工作目录（缺省回落到进程 cwd） */
+  /** Agent 工作目录（缺省 ~/.dsh-qqbot/workspace，不随宿主进程 cwd） */
   cwd?: string;
   /** 是否启用群消息 @mention 门控 */
   requireMention: boolean;
@@ -88,7 +101,7 @@ export interface ImQQBotConfig {
   textChunkLimit: number;
   /** 是否启用流式输出（群聊始终不启用） */
   streaming: boolean;
-  /** 每会话最大闲置时长(ms)，超时自动回收 */
+  /** 每会话最大闲置时长(ms)，超时自动回收；<=0 表示不回收 */
   sessionIdleTimeout: number;
   /** 并发队列最大长度 */
   maxQueue: number;
@@ -110,14 +123,16 @@ export interface ImQQBotConfig {
   vision: VisionConfig;
   /** 附件发送（qqbot_send_file 工具与交付物投递共用） */
   sendFile: SendFileConfig;
+  /** 主动推送策略 */
+  proactiveDelivery: ProactiveDeliveryConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
 export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
-  c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式'),
-  c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单'),
-  groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式'),
-  groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单'),
+  c2cMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('C2C访问模式（默认开放）'),
+  c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单（QQ OpenID）'),
+  groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式（默认开放：群自带进群门槛 + @bot 触发）'),
+  groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单（群 OpenID）'),
 });
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -126,7 +141,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   provider: Schema.string().description('LLM provider name'),
   model: Schema.string().description('Model name'),
   preset: Schema.string().description('Agent preset id'),
-  cwd: Schema.string().description('Agent working directory'),
+  cwd: Schema.string().description('Agent working directory (default ~/.dsh-qqbot/workspace)'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
   groupSmartReply: Schema.boolean().default(false).description('群聊智能回复（仅在关闭仅@触发时生效）'),
   groupReplyPrompt: Schema.string().default(DEFAULT_GROUP_REPLY_PROMPT).description('群聊接话判断提示词（留空使用默认策略）'),
@@ -138,7 +153,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   directPromptFile: Schema.string().description('私聊本地提示词文件绝对路径'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),
   streaming: Schema.boolean().default(true).description('是否启用流式输出（群聊始终不启用）'),
-  sessionIdleTimeout: Schema.number().default(30 * 60 * 1000).description('会话闲置超时(ms)'),
+  sessionIdleTimeout: Schema.number().default(30 * 60 * 1000).description('会话闲置超时(ms)，<=0 不回收'),
   maxQueue: Schema.number().default(20).description('并发队列最大长度'),
   processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
   askTimeoutMs: Schema.number().default(5 * 60 * 1000).description('待答问题超时(ms)，超时自动拒绝并提示'),
@@ -188,4 +203,10 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     sendPresentedFiles: true,
     maxFiles: 4,
   }).description('附件发送配置'),
+  proactiveDelivery: Schema.object({
+    externalTurns: Schema.union(['off', 'c2c', 'all']).default('c2c')
+      .description('非 QQ 输入（如桌面续聊）的回合是否推送到 QQ：off=不推送，c2c=仅私聊，all=私聊和群聊'),
+  }).default({
+    externalTurns: 'c2c',
+  }).description('主动推送策略（定时任务等服务回合始终推送）'),
 });

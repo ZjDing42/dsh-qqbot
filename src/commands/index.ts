@@ -13,7 +13,7 @@ import { modelCommand } from './model.ts';
 import { presetCommand } from './preset.ts';
 import { statusCommand } from './status.ts';
 import { helpCommand } from './help.ts';
-import { pingCommand, versionCommand, stopCommand } from './misc.ts';
+import { pingCommand, versionCommand, stopCommand, meCommand } from './misc.ts';
 
 /**
  * 构建标准命令列表
@@ -29,6 +29,7 @@ export function buildCommandList(deps: CommandDeps): CategorizedCommand[] {
     // QQBot 特有
     pingCommand(),
     versionCommand(deps),
+    meCommand(deps),
     statusCommand(deps),
   ];
 
